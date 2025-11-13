@@ -198,8 +198,8 @@ if __name__ == "__main__":
     main()
 '''
 
-
-
+###########################################################################
+'''
 import time
 from datetime import datetime
 from db_conexion import conectar_sql#, crear_tabla
@@ -246,5 +246,45 @@ def main():
 
 if __name__ == "__main__":
     main()
+'''
+####################################################################################
+
+
+# main.py
+import time
+from db_conexion import conectar_sql
+from db_table import crear_tabla
+from ad_utils import obtener_equipos_ad, insertar_o_actualizar
+from config_loader import cargar_config
+
+config = cargar_config()
+PING_INTERVAL = config["PING_INTERVAL"]
+
+def main():
+    conn = conectar_sql()
+    if not conn:
+        return  # Si no hay conexión, termina
+
+    crear_tabla(conn)
+
+    while True:
+        try:
+            equipos = obtener_equipos_ad()
+            equipos_ad_actuales = [eq["nombre"] for eq in equipos]  # lista de nombres actuales
+            insertar_o_actualizar(conn, equipos, equipos_ad_actuales)
+        except Exception as e:
+            print(f"[ERROR] Ocurrió un error inesperado en el bucle principal: {e}")
+        except KeyboardInterrupt:
+            print("\n[INFO] Script detenido manualmente.")
+            break
+        time.sleep(PING_INTERVAL)
+
+
+
+
+if __name__ == "__main__":
+        main()
+
+    
 
 
