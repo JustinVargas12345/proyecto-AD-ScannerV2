@@ -1,27 +1,15 @@
-'''
-#import pyodbc
-from ldap3 import Server, Connection, ALL
-from ping3 import ping
 import socket
-import threading
-import time
-import datetime
-import os 
-import time
-import platform
 import subprocess
-from ldap3 import Server, Connection, ALL
-import socket
+import platform
+import time
 from datetime import datetime
-from db_conexion import conectar_sql
-from db_table import crear_tabla  # Solo si quieres crearla manualmente
-import utils
-from config_loader import cargar_config  # ✅ Nuevo import
+from ldap3 import Server, Connection, ALL
+from config_loader import cargar_config  # ✅ para obtener la configuración AD
 
 # ======================
 # CONFIGURACIÓN
 # ======================
-config = cargar_config()  # ✅ Se carga desde config_loader
+config = cargar_config()
 PING_INTERVAL = config["PING_INTERVAL"]
 AD_SERVER = config["AD_SERVER"]
 AD_USER = config["AD_USER"]
@@ -36,7 +24,11 @@ estado_ping = {}
 # ======================
 # FUNCIONES
 # ======================
+
 def obtener_equipos_ad():
+    """
+    Lee los equipos desde Active Directory y devuelve una lista de diccionarios.
+    """
     equipos = []
     try:
         server = Server(AD_SERVER, get_info=ALL)
@@ -45,9 +37,9 @@ def obtener_equipos_ad():
             AD_SEARCH_BASE,
             "(objectClass=computer)",
             attributes=[
-                "name","dNSHostName","operatingSystem","operatingSystemVersion",
-                "description","whenCreated","lastLogonTimestamp","managedBy",
-                "location","userAccountControl"
+                "name", "dNSHostName", "operatingSystem", "operatingSystemVersion",
+                "description", "whenCreated", "lastLogonTimestamp", "managedBy",
+                "location", "userAccountControl"
             ]
         )
         for entry in conn.entries:
@@ -68,32 +60,49 @@ def obtener_equipos_ad():
                 ip = "No resuelve"
 
             equipos.append({
-                "nombre": nombre,"so": so,"descripcion": desc,"ip": ip,
-                "nombredns": nombre_dns,"versionso": version_so,"creadoel": creado_el,
-                "ultimologon": ultimo_logon,"responsable": responsable,
-                "ubicacion": ubicacion,"estadocuenta": estado_cuenta
+                "nombre": nombre,
+                "so": so,
+                "descripcion": desc,
+                "ip": ip,
+                "nombredns": nombre_dns,
+                "versionso": version_so,
+                "creadoel": creado_el,
+                "ultimologon": ultimo_logon,
+                "responsable": responsable,
+                "ubicacion": ubicacion,
+                "estadocuenta": estado_cuenta
             })
         print(f"[OK] Equipos obtenidos desde AD: {len(equipos)} encontrados.")
     except Exception as e:
         print("[ERROR] Excepción al leer AD:", e)
     return equipos
 
+
 def hacer_ping(host):
+    """
+    Realiza ping a un host y devuelve su estado.
+    """
     try:
         param = "-n" if platform.system().lower() == "windows" else "-c"
-        result = subprocess.run(["ping", param, "1", host], capture_output=True, timeout=3)
+        result = subprocess.run(["ping", param, "1", host], capture_output=True, timeout=6)
         return "Activo" if result.returncode == 0 else "Inactivo"
     except subprocess.TimeoutExpired:
         return "Timeout"
     except Exception:
         return "Error"
 
+
 def insertar_o_actualizar(conn, equipos, equipos_ad_actuales):
+    """
+    Inserta o actualiza los equipos obtenidos desde AD en la base de datos SQL.
+    También mantiene el seguimiento del estado de ping y del tiempo inactivo.
+    """
     cursor = conn.cursor()
     for eq in equipos:
         ping = hacer_ping(eq["nombre"])
         estado_ad = "Dentro de AD" if eq["nombre"] in equipos_ad_actuales else "Removido de AD"
 
+        # --- Seguimiento de ping ---
         if eq["nombre"] in estado_ping:
             anterior = estado_ping[eq["nombre"]]["estado"]
             if anterior == ping:
@@ -101,17 +110,22 @@ def insertar_o_actualizar(conn, equipos, equipos_ad_actuales):
             else:
                 estado_ping[eq["nombre"]]["estado"] = ping
                 estado_ping[eq["nombre"]]["contador"] = 1
-                if ping == "Inactivo":
+
+            # Actualiza inactividad considerando Timeout/Error como inactivo
+            if ping in ("Inactivo", "Timeout", "Error"):
+                if not estado_ping[eq["nombre"]].get("inactivo_desde"):
                     estado_ping[eq["nombre"]]["inactivo_desde"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                else:
-                    estado_ping[eq["nombre"]]["inactivo_desde"] = None
+            else:
+                estado_ping[eq["nombre"]]["inactivo_desde"] = None
         else:
             estado_ping[eq["nombre"]] = {
                 "estado": ping,
                 "contador": 1,
-                "inactivo_desde": datetime.now().strftime("%Y-%m-%d %H:%M:%S") if ping == "Inactivo" else None
+                "inactivo_desde": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                if ping in ("Inactivo", "Timeout", "Error") else None
             }
 
+        # --- Tiempo acumulado activo/inactivo ---
         tiempo_total_segundos = estado_ping[eq["nombre"]]["contador"] * PING_INTERVAL
         horas = tiempo_total_segundos // 3600
         minutos = (tiempo_total_segundos % 3600) // 60
@@ -163,88 +177,3 @@ def insertar_o_actualizar(conn, equipos, equipos_ad_actuales):
 
         texto_fecha = f" | Inactivo desde: {inactivo_desde}" if inactivo_desde else ""
         print(f"[PING] {eq['nombre']} ({eq['ip']}) → {ping} | {estado_ad} ({tiempo_formateado}){texto_fecha}")
-
-# ======================
-# BUCLE PRINCIPAL
-# ======================
-def main():
-    conn = conectar_sql()
-    if not conn:
-        return
-
-    # Si quieres crear la tabla manualmente alguna vez:
-    crear_tabla(conn)
-
-    while True:
-        try:
-            equipos = obtener_equipos_ad()
-            if not equipos:
-                print("[WARN] No se encontraron equipos en AD.")
-                time.sleep(PING_INTERVAL)
-                continue
-
-            equipos_ad_actuales = [eq["nombre"] for eq in equipos]
-            insertar_o_actualizar(conn, equipos, equipos_ad_actuales)
-            print(f"[INFO] Actualización completada. Esperando {PING_INTERVAL} segundos...\n")
-            time.sleep(PING_INTERVAL)
-        except KeyboardInterrupt:
-            print("\n[INFO] Script detenido manualmente.")
-            break
-        except Exception as e:
-            print("[ERROR] Ocurrió un error inesperado en el bucle principal:", e)
-            time.sleep(PING_INTERVAL)
-
-if __name__ == "__main__":
-    main()
-'''
-
-
-
-import time
-from datetime import datetime
-from db_conexion import conectar_sql#, crear_tabla
-from db_table import crear_tabla
-from config_loader import cargar_config
-from ad_utils import obtener_equipos_ad, insertar_o_actualizar  # ✅ ahora importadas
-
-# ======================
-# CONFIGURACIÓN
-# ======================
-config = cargar_config()  # ✅ Se carga desde config_loader
-PING_INTERVAL = config["PING_INTERVAL"]
-
-# ======================
-# BUCLE PRINCIPAL
-# ======================
-def main():
-    conn = conectar_sql()
-    if not conn:
-        return
-
-    # Si deseas crear la tabla manualmente alguna vez:
-    crear_tabla(conn)
-
-    while True:
-        try:
-            equipos = obtener_equipos_ad()
-            if not equipos:
-                print("[WARN] No se encontraron equipos en AD.")
-                time.sleep(PING_INTERVAL)
-                continue
-
-            equipos_ad_actuales = [eq["nombre"] for eq in equipos]
-            insertar_o_actualizar(conn, equipos, equipos_ad_actuales)
-            print(f"[INFO] Actualización completada. Esperando {PING_INTERVAL} segundos...\n")
-            time.sleep(PING_INTERVAL)
-
-        except KeyboardInterrupt:
-            print("\n[INFO] Script detenido manualmente.")
-            break
-        except Exception as e:
-            print("[ERROR] Ocurrió un error inesperado en el bucle principal:", e)
-            time.sleep(PING_INTERVAL)
-
-if __name__ == "__main__":
-    main()
-
-
